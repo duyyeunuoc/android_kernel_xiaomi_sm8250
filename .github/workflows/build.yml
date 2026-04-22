@@ -1,108 +1,72 @@
-#!/usr/bin/env bash
-set -euo pipefail
+name: Xiaomi SM8250 Kernel Build
 
-DEVICE="${1:-}"
-OPTION="${2:-}"
+on:
+  workflow_dispatch:
+    inputs:
+      Option:
+        description: 'What do you want build option?'
+        required: true
+        type: choice
+        options:
+          - ksun
+          - twrp
+          - stock
 
-if [ -z "$DEVICE" ] || [ -z "$OPTION" ]; then
-  echo "Usage: ./build.sh <device> <ksun|twrp|stock>"
-  exit 1
-fi
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [x1q, y2q, z3q, c1q, c2q, r8q]
+    runs-on: ubuntu-24.04
 
-ROOT_DIR="$(pwd)"
-OUT_DIR="$ROOT_DIR/out"
-AK_DIR="$ROOT_DIR/AnyKernel3"
-SUSFS_DIR="$ROOT_DIR/ksu_module_susfs"
+    steps:
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential make automake autoconf libtool pkg-config \
+            bc bison flex libssl-dev libelf-dev libncurses5-dev libncurses-dev cpio \
+            clang lld gcc g++ \
+            git curl rsync wget pv \
+            python3 python3-pip python-is-python3 \
+            openjdk-17-jdk \
+            zip unzip p7zip-full tar \
+            lz4 xz-utils zlib1g-dev uuid-dev \
+            erofs-utils android-sdk-libsparse-utils \
+            fuse3 libfuse3-dev f2fs-tools fuse2fs attr e2fsprogs \
+            kmod jq
 
-export ARCH=arm64
-export SUBARCH=arm64
-export LLVM=1
-export LLVM_IAS=1
-export CROSS_COMPILE=aarch64-linux-gnu-
-export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+      - name: Import kernel source
+        uses: actions/checkout@v5
+        with:
+          repository: duyyeunuoc/android_kernel_xiaomi_sm8250
+          fetch-depth: 1
+          clean: true
+          submodules: false
 
-echo "==== Device: $DEVICE ===="
-echo "==== Option: $OPTION ===="
+      - name: Add susfs4ksu for kernel-4.19
+        run: |
+          git clone --depth 1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          test -d susfs4ksu/ksu_module_susfs
+          cp -r susfs4ksu/ksu_module_susfs ./
 
-if [ ! -d "$AK_DIR" ]; then
-  echo "AnyKernel3 directory not found"
-  exit 1
-fi
+      - name: Fix build.sh
+        run: |
+          test -f build.sh
+          chmod +x build.sh
 
-if [ ! -f "$ROOT_DIR/Makefile" ]; then
-  echo "Kernel Makefile not found"
-  exit 1
-fi
+      - name: Build for specific device
+        run: ./build.sh ${{ matrix.device }} ${{ github.event.inputs.Option }}
 
-if [ -d "$SUSFS_DIR" ]; then
-  echo "==== SUSFS detected ===="
-else
-  echo "==== SUSFS not found, continuing without it ===="
-fi
-
-if [ -f "$ROOT_DIR/arch/arm64/configs/${DEVICE}_defconfig" ]; then
-  DEFCONFIG="${DEVICE}_defconfig"
-elif [ -f "$ROOT_DIR/arch/arm64/configs/vendor/${DEVICE}_defconfig" ]; then
-  DEFCONFIG="vendor/${DEVICE}_defconfig"
-else
-  echo "Defconfig not found for device: $DEVICE"
-  find "$ROOT_DIR/arch/arm64/configs" -maxdepth 2 -name "*defconfig" | head -50
-  exit 1
-fi
-
-echo "==== Using defconfig: $DEFCONFIG ===="
-make O="$OUT_DIR" "$DEFCONFIG"
-
-echo "==== Building kernel ===="
-make -j"$(nproc --all)" O="$OUT_DIR" LLVM=1 LLVM_IAS=1
-
-BOOT_DIR="$OUT_DIR/arch/arm64/boot"
-IMAGE_SRC=""
-
-for f in Image.gz-dtb Image.gz Image; do
-  if [ -f "$BOOT_DIR/$f" ]; then
-    IMAGE_SRC="$BOOT_DIR/$f"
-    break
-  fi
-done
-
-if [ -z "$IMAGE_SRC" ]; then
-  echo "No kernel image found in $BOOT_DIR"
-  find "$BOOT_DIR" -maxdepth 2 -type f || true
-  exit 1
-fi
-
-DTBO_SRC=""
-if [ -f "$BOOT_DIR/dtbo.img" ]; then
-  DTBO_SRC="$BOOT_DIR/dtbo.img"
-fi
-
-ZIP_NAME="${DEVICE}_${OPTION}.zip"
-WORK_DIR="$ROOT_DIR/ak3_work"
-
-rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR"
-cp -r "$AK_DIR"/. "$WORK_DIR"/
-
-rm -f "$WORK_DIR/Image.gz-dtb" "$WORK_DIR/Image.gz" "$WORK_DIR/Image" "$WORK_DIR/dtbo.img"
-cp "$IMAGE_SRC" "$WORK_DIR/Image.gz-dtb"
-
-if [ -n "$DTBO_SRC" ]; then
-  cp "$DTBO_SRC" "$WORK_DIR/dtbo.img"
-fi
-
-if [ -d "$SUSFS_DIR" ]; then
-  cp -r "$SUSFS_DIR" "$WORK_DIR/" || true
-fi
-
-cd "$WORK_DIR"
-zip -r "../$ZIP_NAME" . -x "*.git*" "*.DS_Store" "README.md"
-cd "$ROOT_DIR"
-
-if [ ! -f "$ROOT_DIR/$ZIP_NAME" ]; then
-  echo "Zip file was not created"
-  exit 1
-fi
-
-sha1sum "$ROOT_DIR/$ZIP_NAME"
-echo "==== Build done: $ZIP_NAME ===="
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.device }}-${{ github.event.inputs.Option }}-kernel
+          path: |
+            ./*.zip
+            prebuilts/output/**/*.zip
+            prebuilts/output/**/*.tar
+            prebuilts/output/**/*.img
+          if-no-files-found: error
+          retention-days: 7
