@@ -1,83 +1,87 @@
-name: Xiaomi SM8250 Kernel Build
+name: Samsung SM8250 Kernel Build SUSFS (v4 Clean)
 
 on:
   workflow_dispatch:
     inputs:
       Option:
-        description: 'What do you want build option?'
+        description: 'ksun, twrp, stock'
         required: true
         type: choice
-        options:
-          - ksun
-          - twrp
-          - stock
+        options: [ksun, twrp, stock]
 
 jobs:
   build:
     strategy:
-      fail-fast: false
       matrix:
-        device: [x1q, y2q, z3q, c1q, c2q, r8q]
+        # Nhắc lại: Test 1 máy cho chắc rồi hãy để cả dàn matrix
+        device: [z3q] 
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Set up build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential make automake autoconf libtool pkg-config \
-            bc bison flex libssl-dev libelf-dev libncurses5-dev libncurses-dev cpio \
-            clang lld gcc g++ \
-            git curl rsync wget pv \
-            python3 python3-pip python-is-python3 \
-            openjdk-17-jdk \
-            zip unzip p7zip-full tar \
-            lz4 xz-utils zlib1g-dev uuid-dev \
-            erofs-utils android-sdk-libsparse-utils \
-            fuse3 libfuse3-dev f2fs-tools fuse2fs attr e2fsprogs \
-            kmod jq
-          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
-          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
+    # 1. Nâng cấp checkout lên v4 (Sửa lỗi Node.js 20)
+    - name: "Checkout source code"
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
 
-      - name: Import kernel source
-        uses: actions/checkout@v5
-        with:
-          repository: GoRhanHee/android_kernel_xiaomi_sm8250
-          fetch-depth: 1
-          clean: true
-          submodules: false
+    - name: "Set up build environment"
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential make bc bison flex libssl-dev libelf-dev clang lld gcc-aarch64-linux-gnu git curl wget jq p7zip-full
 
-      - name: Add susfs4ksu for kernel-4.19
-        run: |
-          git clone --depth 1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-          test -d susfs4ksu/ksu_module_susfs
-          cp -r susfs4ksu/ksu_module_susfs ./
+    # 2. Fix lỗi thiếu Kconfig của KernelSU mà log nãy báo
+    - name: "Fix KernelSU Kconfig"
+      run: |
+        mkdir -p drivers/kernelsu
+        if [ ! -f drivers/kernelsu/Kconfig ]; then
+          echo 'config KERNELSU' > drivers/kernelsu/Kconfig
+          echo '    bool "KernelSU support"' >> drivers/kernelsu/Kconfig
+          echo '    default y' >> drivers/kernelsu/Kconfig
+        fi
+        if [ ! -f drivers/kernelsu/Makefile ]; then
+          echo 'obj-y += kernelsu/' > drivers/kernelsu/Makefile
+        fi
 
-      - name: Find build.sh
-        run: |
-          find . -maxdepth 3 -name build.sh -o -name Makefile | sort
+    - name: "Add SusFS Module"
+      run: |
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 susfs4ksu
+        cp -r susfs4ksu/ksu_module_susfs drivers/ || true
 
-      - name: Setting permission
-        run: |
-          test -f build.sh
-          chmod +x build.sh
+    - name: "Fix Script Paths and Permissions"
+      run: |
+        # Xóa đường dẫn cứng của lão raystef66
+        sed -i 's|/home/raystef66/kernel/||g' build.sh
+        # Cấp quyền cho build script và cả toolchain (vì fork về có thể mất quyền execute)
+        chmod +x build.sh
+        find prebuilts -name "clang" -exec chmod +x {} + || true
 
-      - name: Build for specific device
-        run: ./build.sh ${{ matrix.device }} ${{ github.event.inputs.Option }}
+    - name: "Build Kernel"
+      run: |
+        export KBUILD_BUILD_USER="Duy"
+        export KBUILD_BUILD_HOST="GitHub"
+        # Chạy build. Nếu fail sẽ liệt kê file để ông soi lỗi tiếp
+        ./build.sh ${{ matrix.device }} ${{ github.event.inputs.Option }} || (ls -R && exit 1)
 
-      - name: Check output
-        run: |
-          find prebuilts/output -maxdepth 3 -type f | sort || true
-          find . -maxdepth 4 -type f \( -name "*.zip" -o -name "*.tar" -o -name "*.img" \) | sort || true
+    # 3. Nâng cấp upload lên v4 (Sửa lỗi Node.js 20)
+    - name: "Upload Artifacts (GitHub)"
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kernel-Result-${{ matrix.device }}
+        path: |
+          *.zip
+          *.tar
+          out/arch/arm64/boot/Image*
+          prebuilts/output/*
 
-      - name: Upload kernel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.device }}-${{ github.event.inputs.Option }}-kernel
-          path: |
-            prebuilts/output/**/*.zip
-            prebuilts/output/**/*.tar
-            prebuilts/output/**/*.img
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
+    - name: "Upload to GoFile (Anonymous)"
+      if: always()
+      run: |
+        FINAL_FILE=$(find . -maxdepth 3 -name "*.zip" -o -name "*.tar" | head -n 1)
+        if [ -f "$FINAL_FILE" ]; then
+          RESPONSE=$(curl -F "file=@$FINAL_FILE" "https://upload-eu-par.gofile.io/uploadFile")
+          DOWNLOAD_LINK=$(echo "$RESPONSE" | jq -r '.data.downloadPage')
+          echo "Link tai: $DOWNLOAD_LINK"
+        else
+          echo "Build fail, no file to upload."
+        fi
