@@ -36,8 +36,10 @@ jobs:
             erofs-utils android-sdk-libsparse-utils \
             fuse3 libfuse3-dev f2fs-tools fuse2fs attr e2fsprogs \
             kmod jq
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
-      - name: Checkout kernel source
+      - name: Import kernel source
         uses: actions/checkout@v5
         with:
           repository: GoRhanHee/android_kernel_xiaomi_sm8250
@@ -45,35 +47,11 @@ jobs:
           clean: true
           submodules: false
 
-      - name: Clone toolchain
-        run: |
-          git clone --depth 1 https://github.com/GoRhanHee/android_kernel_xiaomi_sm8250/releases/download/toolchain/toolchain.git toolchain || true
-          if [ ! -d toolchain ]; then
-            echo "Toolchain folder not found"
-            exit 1
-          fi
-
-      - name: Configure toolchain
-        run: |
-          echo "$PWD/toolchain/bin" >> $GITHUB_PATH
-          echo "LLVM=1" >> $GITHUB_ENV
-          echo "LLVM_IAS=1" >> $GITHUB_ENV
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
-
       - name: Add susfs4ksu for kernel-4.19
         run: |
           git clone --depth 1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
           test -d susfs4ksu/ksu_module_susfs
           cp -r susfs4ksu/ksu_module_susfs ./
-
-      - name: Show toolchain
-        run: |
-          which clang || true
-          clang --version || true
-          ls -la toolchain/bin || true
 
       - name: Find build.sh
         run: |
