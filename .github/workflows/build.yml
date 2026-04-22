@@ -36,6 +36,8 @@ jobs:
             erofs-utils android-sdk-libsparse-utils \
             fuse3 libfuse3-dev f2fs-tools fuse2fs attr e2fsprogs \
             kmod jq
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
       - name: Import kernel source
         uses: actions/checkout@v5
@@ -51,10 +53,8 @@ jobs:
           test -d susfs4ksu/ksu_module_susfs
           cp -r susfs4ksu/ksu_module_susfs ./
 
-      - name: Fix build.sh
-        run: |
-          test -f build.sh
-          chmod +x build.sh
+      - name: Make build.sh executable
+        run: chmod +x build.sh
 
       - name: Build for specific device
         run: ./build.sh ${{ matrix.device }} ${{ github.event.inputs.Option }}
@@ -63,10 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.device }}-${{ github.event.inputs.Option }}-kernel
-          path: |
-            ./*.zip
-            prebuilts/output/**/*.zip
-            prebuilts/output/**/*.tar
-            prebuilts/output/**/*.img
+          path: ./*.zip
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
