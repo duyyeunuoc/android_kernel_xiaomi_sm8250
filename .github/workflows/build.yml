@@ -1,87 +1,108 @@
-name: Samsung SM8250 Kernel Build SUSFS (v4 Clean)
+#!/usr/bin/env bash
+set -euo pipefail
 
-on:
-  workflow_dispatch:
-    inputs:
-      Option:
-        description: 'ksun, twrp, stock'
-        required: true
-        type: choice
-        options: [ksun, twrp, stock]
+DEVICE="${1:-}"
+OPTION="${2:-}"
 
-jobs:
-  build:
-    strategy:
-      matrix:
-        # Nhắc lại: Test 1 máy cho chắc rồi hãy để cả dàn matrix
-        device: [z3q] 
-    runs-on: ubuntu-24.04
+if [ -z "$DEVICE" ] || [ -z "$OPTION" ]; then
+  echo "Usage: ./build.sh <device> <ksun|twrp|stock>"
+  exit 1
+fi
 
-    steps:
-    # 1. Nâng cấp checkout lên v4 (Sửa lỗi Node.js 20)
-    - name: "Checkout source code"
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
+ROOT_DIR="$(pwd)"
+OUT_DIR="$ROOT_DIR/out"
+AK_DIR="$ROOT_DIR/AnyKernel3"
+SUSFS_DIR="$ROOT_DIR/ksu_module_susfs"
 
-    - name: "Set up build environment"
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential make bc bison flex libssl-dev libelf-dev clang lld gcc-aarch64-linux-gnu git curl wget jq p7zip-full
+export ARCH=arm64
+export SUBARCH=arm64
+export LLVM=1
+export LLVM_IAS=1
+export CROSS_COMPILE=aarch64-linux-gnu-
+export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-    # 2. Fix lỗi thiếu Kconfig của KernelSU mà log nãy báo
-    - name: "Fix KernelSU Kconfig"
-      run: |
-        mkdir -p drivers/kernelsu
-        if [ ! -f drivers/kernelsu/Kconfig ]; then
-          echo 'config KERNELSU' > drivers/kernelsu/Kconfig
-          echo '    bool "KernelSU support"' >> drivers/kernelsu/Kconfig
-          echo '    default y' >> drivers/kernelsu/Kconfig
-        fi
-        if [ ! -f drivers/kernelsu/Makefile ]; then
-          echo 'obj-y += kernelsu/' > drivers/kernelsu/Makefile
-        fi
+echo "==== Device: $DEVICE ===="
+echo "==== Option: $OPTION ===="
 
-    - name: "Add SusFS Module"
-      run: |
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 susfs4ksu
-        cp -r susfs4ksu/ksu_module_susfs drivers/ || true
+if [ ! -d "$AK_DIR" ]; then
+  echo "AnyKernel3 directory not found"
+  exit 1
+fi
 
-    - name: "Fix Script Paths and Permissions"
-      run: |
-        # Xóa đường dẫn cứng của lão raystef66
-        sed -i 's|/home/raystef66/kernel/||g' build.sh
-        # Cấp quyền cho build script và cả toolchain (vì fork về có thể mất quyền execute)
-        chmod +x build.sh
-        find prebuilts -name "clang" -exec chmod +x {} + || true
+if [ ! -f "$ROOT_DIR/Makefile" ]; then
+  echo "Kernel Makefile not found"
+  exit 1
+fi
 
-    - name: "Build Kernel"
-      run: |
-        export KBUILD_BUILD_USER="Duy"
-        export KBUILD_BUILD_HOST="GitHub"
-        # Chạy build. Nếu fail sẽ liệt kê file để ông soi lỗi tiếp
-        ./build.sh ${{ matrix.device }} ${{ github.event.inputs.Option }} || (ls -R && exit 1)
+if [ -d "$SUSFS_DIR" ]; then
+  echo "==== SUSFS detected ===="
+else
+  echo "==== SUSFS not found, continuing without it ===="
+fi
 
-    # 3. Nâng cấp upload lên v4 (Sửa lỗi Node.js 20)
-    - name: "Upload Artifacts (GitHub)"
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: Kernel-Result-${{ matrix.device }}
-        path: |
-          *.zip
-          *.tar
-          out/arch/arm64/boot/Image*
-          prebuilts/output/*
+if [ -f "$ROOT_DIR/arch/arm64/configs/${DEVICE}_defconfig" ]; then
+  DEFCONFIG="${DEVICE}_defconfig"
+elif [ -f "$ROOT_DIR/arch/arm64/configs/vendor/${DEVICE}_defconfig" ]; then
+  DEFCONFIG="vendor/${DEVICE}_defconfig"
+else
+  echo "Defconfig not found for device: $DEVICE"
+  find "$ROOT_DIR/arch/arm64/configs" -maxdepth 2 -name "*defconfig" | head -50
+  exit 1
+fi
 
-    - name: "Upload to GoFile (Anonymous)"
-      if: always()
-      run: |
-        FINAL_FILE=$(find . -maxdepth 3 -name "*.zip" -o -name "*.tar" | head -n 1)
-        if [ -f "$FINAL_FILE" ]; then
-          RESPONSE=$(curl -F "file=@$FINAL_FILE" "https://upload-eu-par.gofile.io/uploadFile")
-          DOWNLOAD_LINK=$(echo "$RESPONSE" | jq -r '.data.downloadPage')
-          echo "Link tai: $DOWNLOAD_LINK"
-        else
-          echo "Build fail, no file to upload."
-        fi
+echo "==== Using defconfig: $DEFCONFIG ===="
+make O="$OUT_DIR" "$DEFCONFIG"
+
+echo "==== Building kernel ===="
+make -j"$(nproc --all)" O="$OUT_DIR" LLVM=1 LLVM_IAS=1
+
+BOOT_DIR="$OUT_DIR/arch/arm64/boot"
+IMAGE_SRC=""
+
+for f in Image.gz-dtb Image.gz Image; do
+  if [ -f "$BOOT_DIR/$f" ]; then
+    IMAGE_SRC="$BOOT_DIR/$f"
+    break
+  fi
+done
+
+if [ -z "$IMAGE_SRC" ]; then
+  echo "No kernel image found in $BOOT_DIR"
+  find "$BOOT_DIR" -maxdepth 2 -type f || true
+  exit 1
+fi
+
+DTBO_SRC=""
+if [ -f "$BOOT_DIR/dtbo.img" ]; then
+  DTBO_SRC="$BOOT_DIR/dtbo.img"
+fi
+
+ZIP_NAME="${DEVICE}_${OPTION}.zip"
+WORK_DIR="$ROOT_DIR/ak3_work"
+
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR"
+cp -r "$AK_DIR"/. "$WORK_DIR"/
+
+rm -f "$WORK_DIR/Image.gz-dtb" "$WORK_DIR/Image.gz" "$WORK_DIR/Image" "$WORK_DIR/dtbo.img"
+cp "$IMAGE_SRC" "$WORK_DIR/Image.gz-dtb"
+
+if [ -n "$DTBO_SRC" ]; then
+  cp "$DTBO_SRC" "$WORK_DIR/dtbo.img"
+fi
+
+if [ -d "$SUSFS_DIR" ]; then
+  cp -r "$SUSFS_DIR" "$WORK_DIR/" || true
+fi
+
+cd "$WORK_DIR"
+zip -r "../$ZIP_NAME" . -x "*.git*" "*.DS_Store" "README.md"
+cd "$ROOT_DIR"
+
+if [ ! -f "$ROOT_DIR/$ZIP_NAME" ]; then
+  echo "Zip file was not created"
+  exit 1
+fi
+
+sha1sum "$ROOT_DIR/$ZIP_NAME"
+echo "==== Build done: $ZIP_NAME ===="
